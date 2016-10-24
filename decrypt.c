@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <malloc.h>
 #include <string.h>
+#include <stdbool.h>
 
 /* http://stackoverflow.com/a/31488147 */
 uint32_t rotr32(uint32_t n, unsigned int c)
@@ -51,7 +52,7 @@ unsigned char g_JieMi2permutations[] =
     7, 6, 5, 4, 3, 2, 1, 0
 };
 
-int dencry_data(uint32_t *data0, uint32_t *data1, uint32_t *key)
+int dencry_data(bool decrypt, uint32_t *data0, uint32_t *data1, uint32_t *key)
 {
     uint32_t fresult;
     uint32_t accu;
@@ -60,7 +61,8 @@ int dencry_data(uint32_t *data0, uint32_t *data1, uint32_t *key)
 
     do
     {
-        fresult = fMove(key[g_JieMi2permutations[i]] + *data0);
+        /* GOST is reversed by using the key backwards */
+        fresult = fMove(key[g_JieMi2permutations[decrypt ? i : 31-i]] + *data0);
         accu = fresult ^ *data1;
         *data1 = *data0;
         *data0 = accu;
@@ -76,7 +78,13 @@ int dencry_data(uint32_t *data0, uint32_t *data1, uint32_t *key)
 
 int gost_dec(unsigned int *data, unsigned int *key)
 {
-    dencry_data(&data[0], &data[1], key);
+    dencry_data(true, &data[0], &data[1], key);
+    return 1;
+}
+
+int gost_enc(unsigned int *data, unsigned int *key)
+{
+    dencry_data(false, &data[0], &data[1], key);
     return 1;
 }
 
@@ -88,43 +96,67 @@ static unsigned int g_JieMi2encryptionKey[16] =
     0x42424242, 0x42424242, 0x49494949, 0x49494949
 };
 
-void Data_JieMi2(unsigned int *data)
+uint32_t calc_checksum(uint8_t *data, size_t dataSize)
 {
-    gost_dec(data, g_JieMi2encryptionKey);
+    uint32_t checksum = 0;
+
+    for (size_t i = 0; i < dataSize; i++) {
+        checksum += data[i];
+    }
+
+    return checksum;
 }
 
-int decrypt(unsigned char *data, size_t *dataSize)
+uint8_t* decrypt(uint8_t *data, size_t *dataSize)
 {
     size_t encryptedSize = ((*dataSize - 16) & 0xFFFFFFC0) - 64 + 16;
-    unsigned int checksum = 0;
 
     printf("Encrypted data size: 0x%X (%d)\n", encryptedSize, encryptedSize);
 
     /* Verify checksum */
-    for(size_t i = 0; i < encryptedSize; i++) {
-        checksum += data[i];
-    }
-
+    uint32_t checksum = calc_checksum(data, encryptedSize);
     if (checksum != *(unsigned int*)&data[encryptedSize]) {
         puts(" * ERROR: checksum mismatch, file damaged?\n");
-        return 1;
+        return NULL;
     }
 
     printf("Checksum: 0x%X match\n", checksum);
 
     for(size_t i = 0; i < encryptedSize; i += 8) {
-        Data_JieMi2((unsigned int*)&data[i]);
+        gost_dec((unsigned int*)&data[i], g_JieMi2encryptionKey);
     }
 
     *dataSize = encryptedSize;
+    return data;
+}
 
-    return 0;
+uint8_t* encrypt(unsigned char *data, size_t *dataSize)
+{
+    size_t encryptedSize = *dataSize + 64;
+    uint8_t *encrypted = (uint8_t*)malloc(encryptedSize);
+
+    for (size_t i = 0; i < *dataSize; i += 8) {
+        gost_enc((unsigned int*)&data[i], g_JieMi2encryptionKey);
+    }
+
+    uint32_t checksum = calc_checksum(data, *dataSize);
+    printf("Checksum: 0x%X\n", checksum);
+
+    memcpy(encrypted, data, *dataSize);
+
+    /* Write checksum */
+    memset(&encrypted[*dataSize], 0xFF, 64);
+    *(uint32_t*)(&encrypted[*dataSize]) = checksum;
+
+    *dataSize = encryptedSize;
+    return encrypted;
 }
 
 int usage(void)
 {
     puts("MCU decryption utility v1.0\n"
-         "Usage: mcudecrypt INPUT OUTPUT\n"
+         "Usage: mcudecrypt [-e] INPUT OUTPUT\n"
+         "    -e: encrypt instead of decrypt\n"
          "    INPUT: path to hesi_mcu.bin\n"
          "    OUTPUT: path where decrypted file will be written\n");
     return 1;
@@ -135,12 +167,24 @@ int main(int argc, char **argv)
     FILE *fd;
     const char *filename;
     size_t filesize;
-    unsigned char *buf;
+    uint8_t *buf, *output;
+    bool is_encrypt = false;
+    int argn = 1;
 
     if (argc < 3) {
         return usage();
     }
-    filename = argv[1];
+
+    if (strcmp(argv[argn], "-e") == 0) {
+        if (argc < 4) {
+            return usage();
+        }
+
+        is_encrypt = true;
+        argn++;
+    }
+
+    filename = argv[argn++];
     fd = fopen(filename, "rb");
     if (fd == NULL) {
         printf(" * ERROR: File %s not found\n", filename);
@@ -155,15 +199,21 @@ int main(int argc, char **argv)
     fread(buf, filesize, 1, fd);
     fclose(fd);
 
-    decrypt(buf, &filesize);
+    if (is_encrypt)
+        output = encrypt(buf, &filesize);
+    else
+        output = decrypt(buf, &filesize);
 
-    fd = fopen(argv[2], "wb");
+    if (output == NULL)
+        return 1;
+
+    fd = fopen(argv[argn++], "wb");
     if (fd == NULL) {
         printf(" * ERROR: Could not open output file\n");
         return 1;
     }
 
-    fwrite(buf, filesize, 1, fd);
+    fwrite(output, filesize, 1, fd);
     fclose(fd);
 
     puts("Done.\n");
