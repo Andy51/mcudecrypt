@@ -154,7 +154,7 @@ uint8_t* encrypt(unsigned char *data, size_t *dataSize)
 
 int usage(void)
 {
-    puts("MCU decryption utility v1.0\n"
+    puts("MCU decryption utility v1.1\n"
          "Usage: mcudecrypt [-e] INPUT OUTPUT\n"
          "    -e: encrypt instead of decrypt\n"
          "    INPUT: path to hesi_mcu.bin\n"
